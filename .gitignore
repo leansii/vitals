@@ -1,0 +1,12 @@
+node_modules/
+.wrangler/
+# Local secrets for `wrangler dev` — never commit.
+.dev.vars
+.dev.vars.*
+.env
+.env.*
+*.log
+.DS_Store
+
+# Build prompt used to bootstrap this repo; not part of the service.
+PROMPT.md

@@ -1,0 +1,60 @@
+{
+	"$schema": "https://raw.githubusercontent.com/cloudflare/workers-sdk/main/packages/wrangler/config-schema.json",
+	"name": "vitals",
+	"main": "src/index.ts",
+	"compatibility_date": "2025-01-01",
+	// Probe every 15 minutes (96 runs/day). Chosen over */5 so a serverless
+	// Postgres (Neon et al.) can autosuspend most of the time — the DB ping in
+	// /healthz/deep otherwise keeps the compute warm ~24/7 and dominates
+	// free-tier CU-hours. Trade-off: outage detection latency up to 15 min. The
+	// client-error spike check uses a 15-min data window (new_signatures_15m),
+	// independent of this interval, so it stays correct.
+	"triggers": {
+		"crons": [
+			"*/15 * * * *"
+		]
+	},
+	"vars": {
+		// The monitored projects. One entry per project — adding a project is a
+		// config entry plus its health-key secret, no code change. See
+		// config.example.jsonc for every field and README.md for the model.
+		// NOTHING SECRET GOES HERE: this file is committed. Health keys are
+		// Worker secrets, referenced by name via `health_key_secret`.
+		"TARGETS": [
+			{
+				"name": "cyclecare-api",
+				"api_url": "https://api.getcyclecare.com",
+				"expected": "auth=on,auth_emulator=off,storage=on,covers=on,embeddings=on,passkeys=on,cors=on,frontend_url=on,tls=off",
+				"web_targets": "https://app.getcyclecare.com",
+				"client_err_threshold": "3",
+				"health_key_secret": "HEALTH_KEY_CYCLECARE"
+			}
+		]
+	},
+	// Secrets (set once with `npx wrangler secret put <NAME>`, NOT in this file):
+	//   TELEGRAM_BOT_TOKEN     ← from @BotFather
+	//   TELEGRAM_CHAT_ID       ← your chat id (message the bot, then
+	//                            GET https://api.telegram.org/bot<token>/getUpdates
+	//                            and read chat.id)
+	//   HEALTH_KEY_CYCLECARE   ← one per target, named by its `health_key_secret`;
+	//                            same value as the backend's own health key
+	//   MANUAL_PROBE_KEY       ← optional; gates the on-demand GET / probe.
+	//                            Unset = the fetch handler is disabled (404s).
+	"observability": {
+		"enabled": true
+	},
+	// KV state: one `last-signature:<target>` key per target. Lets the worker
+	// alert on state CHANGE + send a 🟢 recovery message instead of re-alerting
+	// every failing tick, independently per target. Binding name must stay
+	// "STATE" — that's what src/index.ts reads (env.STATE). Create your own with:
+	//   npx wrangler kv namespace create HEALTH_STATE
+	// then paste the printed id below (a namespace id is account-scoped, not a
+	// secret). Remove the whole block to run stateless (alerts every failing tick).
+	"kv_namespaces": [
+		{
+			"binding": "STATE",
+			"id": "b4dd8e2cb1a64270aa1950d8d4fb62ba",
+			"remote": true
+		}
+	]
+}

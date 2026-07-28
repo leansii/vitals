@@ -1,0 +1,61 @@
+// config.example.jsonc — the shape of the TARGETS var in wrangler.jsonc.
+//
+// Copy the array below into `vars.TARGETS` in your wrangler.jsonc and edit it.
+// All values here are PLACEHOLDERS. Nothing in this list is secret: health keys
+// are Cloudflare Worker secrets and are referenced BY NAME (`health_key_secret`),
+// never by value. Never put a key, token or chat id in this file.
+//
+// TARGETS also accepts a JSON *string* (`"TARGETS": "[{\"name\": ...}]"`) if you
+// prefer to inject it from CI — the Worker parses both.
+[
+	{
+		// Required. Stable, unique identity of the project. Becomes the `[name]`
+		// tag on every alert and the suffix of its KV state key
+		// (`last-signature:<name>`), which is what keeps each target's alerts and
+		// recovery independent. Renaming it resets that target's state once.
+		"name": "myapp-api",
+
+		// Required. Base URL of the API, no trailing slash. `health_path` is
+		// appended to it.
+		"api_url": "https://api.example.com",
+
+		// Optional. Expected prod states from the endpoint's `config` self-audit,
+		// as `feature=state` pairs. Every listed feature must be present in the
+		// audit AND match, otherwise it alerts — this is the env-var drift
+		// tripwire. Features returned by the audit but absent here are ignored.
+		// Omit to skip the config check entirely.
+		"expected": "auth=on,storage=on,cors=on,tls=off",
+
+		// Optional. Frontend URLs GET-probed for a live response each tick —
+		// catches a broken custom domain or DNS after a cutover. Only >=400 or a
+		// fetch error counts as down (a 3xx means the origin is alive). Accepts a
+		// comma-separated string or a JSON array. Omit to skip.
+		"web_targets": "https://app.example.com,https://example.com",
+
+		// Optional. Alert when this many NEW client-error signatures appeared in
+		// the endpoint's last-15-minutes window (`client_errors.new_signatures_15m`).
+		// 0 or omitted disables the check.
+		"client_err_threshold": "3",
+
+		// Optional. NAME of the Worker secret holding this target's health key,
+		// sent as the `X-Health-Key` request header. Set the value once with
+		//   npx wrangler secret put HEALTH_KEY_MYAPP
+		// Omit the field if the health endpoint is ungated.
+		"health_key_secret": "HEALTH_KEY_MYAPP",
+
+		// Optional. Path of the deep health endpoint. Default "/healthz/deep".
+		"health_path": "/healthz/deep",
+
+		// Optional. Per-request timeout in ms, for both the API and the web
+		// probes. Default 15000.
+		"timeout_ms": 15000
+	},
+
+	// A second project. It watches only frontends: no `expected`, no health key.
+	{
+		"name": "myblog",
+		"api_url": "https://blog.example.com",
+		"health_path": "/healthz",
+		"web_targets": ["https://blog.example.com"]
+	}
+]
