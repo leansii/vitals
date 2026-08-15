@@ -14,6 +14,17 @@
 			"*/15 * * * *"
 		]
 	},
+	// Optional: a custom domain for the on-demand probe, so it doesn't depend on
+	// the workers.dev subdomain. The zone must be on the same Cloudflare account.
+	// Declaring it here rather than only in the dashboard keeps the deploy
+	// reproducible. Delete this block if you don't want a stable hostname — the
+	// cron runs regardless, and without MANUAL_PROBE_KEY the handler 404s anyway.
+	"routes": [
+		{
+			"pattern": "vitals.leansii.com",
+			"custom_domain": true
+		}
+	],
 	"vars": {
 		// The monitored projects. One entry per project — adding a project is a
 		// config entry plus its health-key secret, no code change. See

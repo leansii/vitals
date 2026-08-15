@@ -150,9 +150,13 @@ The `fetch` handler probes on demand, gated by `MANUAL_PROBE_KEY`. If that secre
 is unset the handler is disabled and returns 404 to everyone.
 
 ```sh
-curl -H "X-Health-Key: $MANUAL_PROBE_KEY" https://vitals.<subdomain>.workers.dev
-curl -H "X-Health-Key: $MANUAL_PROBE_KEY" "https://vitals.<subdomain>.workers.dev/?target=myapp-api"
+curl -H "X-Health-Key: $MANUAL_PROBE_KEY" https://vitals.example.com
+curl -H "X-Health-Key: $MANUAL_PROBE_KEY" "https://vitals.example.com/?target=myapp-api"
 ```
+
+The worker answers on its `workers.dev` subdomain out of the box; the `routes`
+block in `wrangler.jsonc` optionally binds a custom domain (the zone must be on
+the same Cloudflare account). Remove that block if you don't need one.
 
 It returns the per-target problems as JSON, and sends the same Telegram alerts
 the cron would (it runs the identical code path, KV state included).
