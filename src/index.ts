@@ -31,9 +31,16 @@ export interface TargetConfig {
   /** Frontend URLs GET-probed for a live response (<400) each tick — catches a
    *  broken custom domain / DNS. Comma-separated string or array. */
   web_targets?: string | string[]
-  /** Alert when this many NEW client-error signatures appeared in the last 15
-   *  minutes. 0 disables the check. Default 0. */
+  /** Alert when this many NEW client-error signatures appeared in the sampled
+   *  window. 0 disables the check. Default 0. */
   client_err_threshold?: string | number
+  /** Width in minutes of the client-error window to ask the backend for, sent as
+   *  ?spike_window_minutes=N. Defaults to deep_every_minutes, which is what you
+   *  almost always want: a poller running every N minutes but reading a fixed
+   *  15-minute window only sees 15/N of the elapsed time, and a spike in the
+   *  blind interval is never reported. Omitted entirely when neither is set, so
+   *  backends without the parameter keep their old behaviour. */
+  spike_window_minutes?: string | number
   /** Name of the Worker secret holding this target's health key, e.g.
    *  "HEALTH_KEY_MYAPP". Resolved from `env` at runtime — the key itself never
    *  lives in the repo. Omit if the endpoint is ungated. */
@@ -83,7 +90,16 @@ interface DeepResponse {
   status: string
   checks: CheckResult[]
   config: AuditEntry[]
-  client_errors?: { new_signatures_15m: number; total_errors_24h: number }
+  client_errors?: {
+    /** Fixed 15-minute window. The original field; still the fallback for
+     *  backends that do not honour ?spike_window_minutes. */
+    new_signatures_15m: number
+    total_errors_24h: number
+    /** Echo of the window the backend actually applied. */
+    spike_window_minutes?: number
+    /** Count over that window. Preferred when present. */
+    new_signatures_window?: number
+  }
 }
 
 export interface TargetResult {
@@ -125,6 +141,19 @@ function hostOf(url: string): string {
     return new URL(url).host
   } catch {
     return url
+  }
+}
+
+/** Append the requested client-error window to the deep URL. Left alone when no
+ *  window is configured, so the request stays byte-identical to before. */
+function deepUrl(base: string, spikeWindow: number): string {
+  if (!(spikeWindow > 0)) return base
+  try {
+    const url = new URL(base)
+    url.searchParams.set('spike_window_minutes', String(Math.round(spikeWindow)))
+    return url.toString()
+  } catch {
+    return base // malformed api_url — let fetch surface it as it would anyway
   }
 }
 
@@ -184,9 +213,12 @@ async function probeApi(target: TargetConfig, env: Env): Promise<string[]> {
     headers['X-Health-Key'] = key
   }
 
+  // Ask for a window matching how often we actually poll (see spike_window_minutes).
+  const spikeWindow = Number(target.spike_window_minutes ?? target.deep_every_minutes ?? 0)
+
   let res: Response
   try {
-    res = await fetch(`${target.api_url}${path}`, {
+    res = await fetch(deepUrl(`${target.api_url}${path}`, spikeWindow), {
       headers,
       signal: AbortSignal.timeout(timeout),
     })
@@ -236,10 +268,17 @@ async function probeApi(target: TargetConfig, env: Env): Promise<string[]> {
   // aggregation, e.g. a broken web deploy throwing on every keystroke.
   const threshold = Number(target.client_err_threshold ?? 0)
   const spike = body.client_errors
-  if (threshold > 0 && spike && spike.new_signatures_15m >= threshold) {
-    problems.push(
-      `${at} [web] client errors: ${spike.new_signatures_15m} new signature(s) in 15m (${spike.total_errors_24h} events/24h)`,
-    )
+  if (threshold > 0 && spike) {
+    // Prefer the window we asked for; fall back to the fixed 15-minute field so
+    // a backend that ignores the parameter still reports something.
+    const windowed = typeof spike.new_signatures_window === 'number'
+    const count = windowed ? (spike.new_signatures_window as number) : spike.new_signatures_15m
+    const width = windowed && spike.spike_window_minutes ? `${spike.spike_window_minutes}m` : '15m'
+    if (Number.isFinite(count) && count >= threshold) {
+      problems.push(
+        `${at} [web] client errors: ${count} new signature(s) in ${width} (${spike.total_errors_24h} events/24h)`,
+      )
+    }
   }
 
   return problems

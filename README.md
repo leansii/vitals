@@ -38,9 +38,21 @@ what is present:
   "status": "ok",
   "checks": [{ "name": "database", "ok": true, "latency_ms": 42, "detail": "" }],
   "config": [{ "feature": "auth", "state": "on", "detail": "firebase" }],
-  "client_errors": { "new_signatures_15m": 0, "total_errors_24h": 12 }
+  "client_errors": {
+    "new_signatures_15m": 0,   // fixed window; the fallback
+    "total_errors_24h": 12,
+    "spike_window_minutes": 60, // window actually applied, echoed back
+    "new_signatures_window": 0  // count over it; preferred when present
+  }
 }
 ```
+
+**`?spike_window_minutes=N`** — vitals appends this to the deep request whenever
+a window is configured, and reads `new_signatures_window` from the reply. A
+poller that runs every N minutes but reads a fixed 15-minute window only sees
+15/N of the elapsed time, so a spike in the blind interval is never reported.
+Honouring the parameter is optional: ignore it and vitals falls back to
+`new_signatures_15m` unchanged.
 
 Gate it behind a shared secret compared against the `X-Health-Key` header, and
 return **404** when the key does not match — vitals reports a 404 on that route
@@ -84,6 +96,7 @@ key, and vitals resolves it from the environment at runtime.
 | `health_key_secret` | | Name of the Worker secret sent as `X-Health-Key`. Omit if the endpoint is ungated. |
 | `health_path` | | Default `/healthz/deep`. |
 | `deep_every_minutes` | | Throttle the deep probe to once per N minutes while frontends stay on the cron cadence. For scale-to-zero databases — see below. `0`/omitted = every tick. |
+| `spike_window_minutes` | | Client-error window to request, as `?spike_window_minutes=N`. Defaults to `deep_every_minutes`. Omitted when neither is set. |
 | `timeout_ms` | | Default `15000`. |
 
 `TARGETS` also accepts a JSON **string** (`"TARGETS": "[{\"name\": …}]"`) if you
@@ -205,9 +218,12 @@ an ongoing outage would flap 🔴/🟢 once per tick.
 Two costs remain, both real:
 
 - a failed dependency is reported up to `deep_every_minutes` late;
-- `client_errors.new_signatures_15m` is a fixed 15-minute window, so at 60 it
-  samples 15 minutes out of every 60. Spikes that start and subside in between
-  are never seen. Lower the value if that check matters more than the compute.
+- the client-error check under-samples **unless the backend honours
+  `?spike_window_minutes`**. vitals requests a window matching its own cadence
+  automatically; a backend that ignores it falls back to the fixed 15-minute
+  field, which at `deep_every_minutes: 60` covers a quarter of the time and at
+  240 covers 6%. Either implement the parameter or keep the interval low — a
+  check that silently samples 6% of the time is worse than one switched off.
 
 None of this applies when the health endpoint does not touch a scale-to-zero
 database: leave `deep_every_minutes` unset. Do check first, though — a *shallow*

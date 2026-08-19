@@ -60,6 +60,14 @@
 		// recovery). 0 or omitted = probe deep every tick.
 		"deep_every_minutes": 60,
 
+		// Optional. Width of the client-error window to request, sent as
+		// ?spike_window_minutes=N. Defaults to deep_every_minutes, which is
+		// normally right: a poller running every N minutes that reads a fixed
+		// 15-minute window sees 15/N of the elapsed time and misses spikes in the
+		// gap. Backends that ignore the parameter fall back to the 15-minute
+		// field. Set explicitly only to decouple the two.
+		"spike_window_minutes": 240,
+
 		// Optional. Per-request timeout in ms, for both the API and the web
 		// probes. Default 15000.
 		"timeout_ms": 15000
