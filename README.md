@@ -24,8 +24,9 @@ independent state, so a broken project never delays or masks the others.
 • [web] https://app.getcyclecare.com returned 502
 ```
 
-Free tier all the way down: a Worker on the `*/15` cron is ~96 runs/day, well
-inside Cloudflare's free limits.
+Free tier all the way down: the Worker's hourly cron is 24 runs/day, far inside
+Cloudflare's free limits. Pick the interval with care, though, if your health
+check touches a scale-to-zero database — see [Why hourly](#why-hourly-and-how-to-pick-your-own-interval).
 
 ## What your backend has to expose
 
@@ -130,7 +131,7 @@ npm install
    npx wrangler deploy
    ```
 
-That is it — the `*/15 * * * *` cron starts probing.
+That is it — the hourly cron starts probing.
 
 ## Adding a project
 
@@ -161,15 +162,38 @@ the same Cloudflare account). Remove that block if you don't need one.
 It returns the per-target problems as JSON, and sends the same Telegram alerts
 the cron would (it runs the identical code path, KV state included).
 
-## Why every 15 minutes
+## Why hourly, and how to pick your own interval
 
-`*/5` keeps a serverless Postgres (Neon and friends) awake around the clock,
-because the DB ping inside the deep check is enough to block autosuspend — that
-alone can dominate a free-tier CU-hour budget. `*/15` lets the compute suspend
-between probes. The trade-off is up to 15 minutes of detection latency. The
-client-error spike check reads a 15-minute window on the backend side, so it
-stays correct at this interval. Change `triggers.crons` if your backend has no
-such cost.
+If your deep check pings a **serverless Postgres**, the probe interval is set by
+the database, not by how fast you want to hear about an outage.
+
+A compute that has scaled to zero stays awake for its entire idle timeout once
+something wakes it. On Neon's Free plan that timeout is a fixed 5 minutes and
+cannot be shortened or disabled, so a probe that takes 127 ms still costs **five
+minutes of compute** against a quota of 100 CU-hours per project per month:
+
+| cron | probes/day | compute/day | ≈ CU-h/month | share of the free quota |
+| --- | --- | --- | --- | --- |
+| `*/5` | 288 | 24 h | ~180 | over quota by itself |
+| `*/15` | 96 | 8 h | ~60 | 60% |
+| `0 * * * *` | 24 | 2 h | ~15 | 15% |
+| `0 */4 * * *` | 6 | 0.5 h | ~4 | 4% |
+
+At `*/15` the monitor alone burns most of the allowance; add real traffic and the
+project hits its limit mid-month, Neon suspends the compute, and the monitor has
+taken down the thing it was monitoring. Hence the hourly default.
+
+Two costs come with it, both real:
+
+- outage detection latency of up to an hour;
+- `client_errors.new_signatures_15m` is a fixed 15-minute window, so an hourly
+  probe samples 15 minutes out of every 60. Spikes that start and subside in
+  between are never seen. Keep the interval at or below 15 minutes if that check
+  matters more to you than the compute budget.
+
+None of this applies if your health endpoint does not touch a scale-to-zero
+database — set `triggers.crons` as fast as you like. Note that a *shallow*
+health route often pings the database too; check before assuming it is free.
 
 ## Development
 

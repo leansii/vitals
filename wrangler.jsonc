@@ -3,15 +3,25 @@
 	"name": "vitals",
 	"main": "src/index.ts",
 	"compatibility_date": "2025-01-01",
-	// Probe every 15 minutes (96 runs/day). Chosen over */5 so a serverless
-	// Postgres (Neon et al.) can autosuspend most of the time — the DB ping in
-	// /healthz/deep otherwise keeps the compute warm ~24/7 and dominates
-	// free-tier CU-hours. Trade-off: outage detection latency up to 15 min. The
-	// client-error spike check uses a 15-min data window (new_signatures_15m),
-	// independent of this interval, so it stays correct.
+	// Probe hourly. This interval is dictated by the DATABASE, not by how fast
+	// you want to detect an outage. /healthz/deep pings Postgres, and a
+	// serverless Postgres that has scaled to zero stays awake for its whole
+	// idle timeout once woken — on Neon's Free plan a fixed 5 minutes, which
+	// cannot be shortened or disabled. So every probe costs >=5 min of compute
+	// against a 100 CU-hour/month/project quota:
+	//   */15      96 probes/day x 5 min = 8 h/day ~= 60 CU-h/month  (60% of it)
+	//   0 * * * * 24 probes/day x 5 min = 2 h/day ~= 15 CU-h/month
+	// At */15 the monitor exhausts the quota on its own, Neon suspends the
+	// compute, and the watchman takes down what it was watching. Hence hourly.
+	// Trade-offs, both real: outage detection latency up to 1 hour, and the
+	// client-error check reads a fixed 15-min window (new_signatures_15m), so
+	// at this cadence it samples 15 min out of every 60 — spikes that start and
+	// subside in between are missed entirely.
+	// If your health endpoint does not touch a scale-to-zero database, none of
+	// this applies and */15 or faster is fine.
 	"triggers": {
 		"crons": [
-			"*/15 * * * *"
+			"0 * * * *"
 		]
 	},
 	// Optional: a custom domain for the on-demand probe, so it doesn't depend on
