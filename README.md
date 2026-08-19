@@ -156,9 +156,11 @@ curl -H "X-Health-Key: $MANUAL_PROBE_KEY" https://vitals.example.com
 curl -H "X-Health-Key: $MANUAL_PROBE_KEY" "https://vitals.example.com/?target=myapp-api"
 ```
 
-The worker answers on its `workers.dev` subdomain out of the box; the `routes`
-block in `wrangler.jsonc` optionally binds a custom domain (the zone must be on
-the same Cloudflare account). Remove that block if you don't need one.
+The worker answers on its `workers.dev` subdomain out of the box. Adding a
+`routes` block binds a custom domain instead (the zone must be on the same
+Cloudflare account) — note that declaring one makes wrangler **disable** the
+workers.dev subdomain unless you also set `"workers_dev": true`, so the worker
+then answers at the custom domain only.
 
 It returns the per-target problems as JSON, and sends the same Telegram alerts
 the cron would (it runs the identical code path, KV state included).

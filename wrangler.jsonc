@@ -24,6 +24,12 @@
 			"custom_domain": true
 		}
 	],
+	// Declaring a route makes wrangler disable the workers.dev subdomain by
+	// default; stating it silences the warning and pins the intent — the worker
+	// is reachable at the custom domain only. Set both to true (or drop
+	// "routes") to go back to <name>.<subdomain>.workers.dev.
+	"workers_dev": false,
+	"preview_urls": false,
 	"vars": {
 		// The monitored projects. One entry per project — adding a project is a
 		// config entry plus its health-key secret, no code change. See
