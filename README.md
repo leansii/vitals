@@ -225,7 +225,9 @@ npx wrangler kv key delete "deep:<target-name>" --namespace-id <id> --remote
 ```
 
 Worth doing after any deploy that changes what the monitored service reports.
-The manual probe has the same effect, since it always forces a deep check.
+Allow a tick for it to take effect: KV deletes take up to a minute to propagate,
+so a tick firing right after the delete may still read the old value and skip the
+probe again. The manual probe is immediate, since it always forces a deep check.
 
 Two costs remain, both real:
 
