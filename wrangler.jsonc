@@ -41,7 +41,16 @@
 				"name": "cyclecare-api",
 				"api_url": "https://api.getcyclecare.com",
 				"expected": "auth=on,auth_emulator=off,storage=on,covers=on,embeddings=on,passkeys=on,cors=on,frontend_url=on,tls=off",
-				"web_targets": "https://app.getcyclecare.com",
+				// The frontend, plus the API's dependency-free liveness route. /livez
+				// answers 200 whenever the process is up, even with Postgres down,
+				// so probing it every tick costs nothing against the Neon quota and
+				// still catches "the API is gone" within one cron interval — which
+				// is what lets deep_every_minutes back off.
+				// NOT /healthz: that exact path is intercepted above the container
+				// and never reaches the app (verified 2026-08-19 — a random path and
+				// even "/healthz/" with a trailing slash both reach it; "/healthz"
+				// alone returns a Google HTML 404).
+				"web_targets": "https://app.getcyclecare.com,https://api.getcyclecare.com/livez",
 				"client_err_threshold": "3",
 				"health_key_secret": "HEALTH_KEY_CYCLECARE",
 				// The API pings Neon. A woken Neon compute stays up for its idle
