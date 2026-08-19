@@ -24,9 +24,9 @@ independent state, so a broken project never delays or masks the others.
 • [web] https://app.getcyclecare.com returned 502
 ```
 
-Free tier all the way down: the Worker's hourly cron is 24 runs/day, far inside
-Cloudflare's free limits. Pick the interval with care, though, if your health
-check touches a scale-to-zero database — see [Why hourly](#why-hourly-and-how-to-pick-your-own-interval).
+Free tier all the way down: 96 Worker runs/day is far inside Cloudflare's free
+limits. If your health check touches a scale-to-zero database, though, the probe
+interval is a **cost** decision — see [Probe intervals](#probe-intervals-and-scale-to-zero-databases).
 
 ## What your backend has to expose
 
@@ -83,6 +83,7 @@ key, and vitals resolves it from the environment at runtime.
 | `client_err_threshold` | | Alert at this many new signatures in 15 min. `0`/omitted disables. |
 | `health_key_secret` | | Name of the Worker secret sent as `X-Health-Key`. Omit if the endpoint is ungated. |
 | `health_path` | | Default `/healthz/deep`. |
+| `deep_every_minutes` | | Throttle the deep probe to once per N minutes while frontends stay on the cron cadence. For scale-to-zero databases — see below. `0`/omitted = every tick. |
 | `timeout_ms` | | Default `15000`. |
 
 `TARGETS` also accepts a JSON **string** (`"TARGETS": "[{\"name\": …}]"`) if you
@@ -131,7 +132,7 @@ npm install
    npx wrangler deploy
    ```
 
-That is it — the hourly cron starts probing.
+That is it — the cron starts probing every 15 minutes.
 
 ## Adding a project
 
@@ -162,38 +163,54 @@ the same Cloudflare account). Remove that block if you don't need one.
 It returns the per-target problems as JSON, and sends the same Telegram alerts
 the cron would (it runs the identical code path, KV state included).
 
-## Why hourly, and how to pick your own interval
+## Probe intervals and scale-to-zero databases
 
-If your deep check pings a **serverless Postgres**, the probe interval is set by
-the database, not by how fast you want to hear about an outage.
+If your deep check pings a **serverless Postgres**, the probe interval stops
+being a question of how fast you want to hear about an outage and becomes a
+question of budget.
 
 A compute that has scaled to zero stays awake for its entire idle timeout once
 something wakes it. On Neon's Free plan that timeout is a fixed 5 minutes and
-cannot be shortened or disabled, so a probe that takes 127 ms still costs **five
-minutes of compute** against a quota of 100 CU-hours per project per month:
+cannot be shortened or disabled, so a probe that returns in 127 ms still costs
+**five minutes of compute** against a quota of 100 CU-hours per project per
+month:
 
-| cron | probes/day | compute/day | ≈ CU-h/month | share of the free quota |
+| deep probe every | probes/day | compute/day | ≈ CU-h/month | share of the free quota |
 | --- | --- | --- | --- | --- |
-| `*/5` | 288 | 24 h | ~180 | over quota by itself |
-| `*/15` | 96 | 8 h | ~60 | 60% |
-| `0 * * * *` | 24 | 2 h | ~15 | 15% |
-| `0 */4 * * *` | 6 | 0.5 h | ~4 | 4% |
+| 5 min | 288 | 24 h | ~180 | over quota on its own |
+| 15 min | 96 | 8 h | ~60 | 60% |
+| 60 min | 24 | 2 h | ~15 | 15% |
+| 4 h | 6 | 0.5 h | ~4 | 4% |
 
-At `*/15` the monitor alone burns most of the allowance; add real traffic and the
-project hits its limit mid-month, Neon suspends the compute, and the monitor has
-taken down the thing it was monitoring. Hence the hourly default.
+At 15 minutes the monitor alone burns most of the allowance. Add real traffic
+and the project hits its ceiling mid-month; Neon then suspends the compute, and
+the monitor has taken down the thing it was monitoring. That is not a
+hypothetical — it is why `deep_every_minutes` exists.
 
-Two costs come with it, both real:
+**The fix is not a slower cron.** Slowing the cron also slows the free checks.
+Instead, split the two:
 
-- outage detection latency of up to an hour;
-- `client_errors.new_signatures_15m` is a fixed 15-minute window, so an hourly
-  probe samples 15 minutes out of every 60. Spikes that start and subside in
-  between are never seen. Keep the interval at or below 15 minutes if that check
-  matters more to you than the compute budget.
+```jsonc
+// cron: "*/15 * * * *"   ← frontends probed every 15 min, costs nothing
+"deep_every_minutes": 60  ← database woken once an hour
+```
 
-None of this applies if your health endpoint does not touch a scale-to-zero
-database — set `triggers.crons` as fast as you like. Note that a *shallow*
-health route often pings the database too; check before assuming it is free.
+Frontend outages are still caught within 15 minutes; the database is woken 24
+times a day instead of 96. The last deep result is cached in KV and replayed on
+throttled ticks, so a skipped probe can never read as a recovery — without that,
+an ongoing outage would flap 🔴/🟢 once per tick.
+
+Two costs remain, both real:
+
+- a failed dependency is reported up to `deep_every_minutes` late;
+- `client_errors.new_signatures_15m` is a fixed 15-minute window, so at 60 it
+  samples 15 minutes out of every 60. Spikes that start and subside in between
+  are never seen. Lower the value if that check matters more than the compute.
+
+None of this applies when the health endpoint does not touch a scale-to-zero
+database: leave `deep_every_minutes` unset. Do check first, though — a *shallow*
+health route often pings the database too, so pointing `health_path` at it saves
+nothing.
 
 ## Development
 

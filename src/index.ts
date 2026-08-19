@@ -12,6 +12,10 @@
 // Targets are probed concurrently and hold independent KV state, so a broken
 // project neither delays nor masks the others.
 //
+// The deep probe can be throttled per target (deep_every_minutes) while the
+// cheap frontend probes stay on the cron's cadence — the deep one wakes a
+// scale-to-zero database, and waking one costs its whole idle timeout.
+//
 // Deploy: npx wrangler deploy    Config + secrets: see README.md.
 
 export interface TargetConfig {
@@ -36,6 +40,13 @@ export interface TargetConfig {
   health_key_secret?: string
   /** Path of the deep health endpoint. Default "/healthz/deep". */
   health_path?: string
+  /** Throttle the deep probe to at most once per N minutes, independently of
+   *  the cron interval. Use when the health endpoint touches a scale-to-zero
+   *  database: waking one costs its whole idle timeout (5 min on Neon's Free
+   *  plan), so a frequent cron burns the compute quota. Web targets stay on the
+   *  cron's cadence — they are static and cost nothing. Requires the STATE
+   *  binding. 0 or omitted = probe deep on every tick. */
+  deep_every_minutes?: string | number
   /** Per-request timeout. Default 15000. */
   timeout_ms?: string | number
 }
@@ -48,7 +59,8 @@ export interface Env {
   TELEGRAM_CHAT_ID: string
   /** Optional secret gating the manual `fetch` probe. Unset = handler disabled. */
   MANUAL_PROBE_KEY?: string
-  /** KV namespace holding one `last-signature:<name>` key per target. */
+  /** KV namespace. Per target: `last-signature:<name>` (alert edge-trigger)
+   *  and, when deep_every_minutes is set, `deep:<name>` (last deep result). */
   STATE?: KVNamespace
   /** Per-target health keys are looked up here by their `health_key_secret`. */
   [binding: string]: unknown
@@ -79,10 +91,30 @@ export interface TargetResult {
   problems: string[]
   alerted: boolean
   recovered: boolean
+  /** False when deep_every_minutes made this tick reuse the previous deep
+   *  result instead of re-probing the API. */
+  deep_checked: boolean
+}
+
+export interface ProbeOptions {
+  /** Probe deep regardless of deep_every_minutes. Used by the manual handler:
+   *  an on-demand check should report on now, not replay a cached result. */
+  forceDeep?: boolean
+}
+
+/** What the last deep probe found, and when. Persisted so a throttled tick can
+ *  replay it — see probe(). */
+interface DeepState {
+  at: number
+  problems: string[]
 }
 
 const DEFAULT_HEALTH_PATH = '/healthz/deep'
 const DEFAULT_TIMEOUT_MS = 15_000
+/** Cron ticks jitter by seconds. Without slack, a deep probe due at exactly
+ *  60 min would miss its tick by a hair, slip to the next one, and the schedule
+ *  would walk forward every hour. */
+const DEEP_DUE_GRACE_MS = 60_000
 /** KV key for problems with the TARGETS config itself, not with any target. */
 const CONFIG_STATE_KEY = 'last-signature:__config__'
 
@@ -231,11 +263,48 @@ async function probeWeb(target: TargetConfig): Promise<string[]> {
   return results.filter((p): p is string => p !== null)
 }
 
-export async function probe(target: TargetConfig, env: Env): Promise<string[]> {
+/** Last deep result for a target, or null when there is none / it is unusable. */
+async function readDeepState(target: TargetConfig, env: Env): Promise<DeepState | null> {
+  const raw = await env.STATE?.get(`deep:${target.name}`)
+  if (!raw) return null
+  try {
+    const parsed = JSON.parse(raw) as DeepState
+    return typeof parsed?.at === 'number' && Array.isArray(parsed.problems) ? parsed : null
+  } catch {
+    return null // corrupt value: re-probe and overwrite it
+  }
+}
+
+export async function probe(
+  target: TargetConfig,
+  env: Env,
+  opts: ProbeOptions = {},
+): Promise<{ problems: string[]; deepChecked: boolean }> {
+  const now = Date.now()
+  const every = Number(target.deep_every_minutes ?? 0)
+  // Throttling needs somewhere to remember the last run. With no KV, or no
+  // record yet, probe deep: over-checking costs compute, under-checking hides
+  // an outage, and only one of those is recoverable.
+  const cached = every > 0 && env.STATE ? await readDeepState(target, env) : null
+  const runDeep = opts.forceDeep === true || every <= 0 || cached === null || now - cached.at >= every * 60_000 - DEEP_DUE_GRACE_MS
+
   // The API and the frontends are independent surfaces — a dead API must not
-  // stop us from reporting that the frontend is also down.
-  const [api, web] = await Promise.all([probeApi(target, env), probeWeb(target)])
-  return [...api, ...web]
+  // stop us from reporting that the frontend is also down. Web targets are
+  // probed every tick regardless: they are static and cost nothing to hit.
+  const [deep, web] = await Promise.all([
+    // Replaying the cached deep result on a throttled tick is what keeps the
+    // alert signature stable. Dropping it instead would read as "problem gone"
+    // and fire a false 🟢 recovery, then re-alert on the next deep run — the
+    // monitor would flap once per cron tick while the outage continued.
+    runDeep ? probeApi(target, env) : Promise.resolve(cached?.problems ?? []),
+    probeWeb(target),
+  ])
+
+  if (runDeep && every > 0 && env.STATE) {
+    const state: DeepState = { at: now, problems: deep }
+    await env.STATE.put(`deep:${target.name}`, JSON.stringify(state))
+  }
+  return { problems: [...deep, ...web], deepChecked: runDeep }
 }
 
 async function telegram(env: Env, text: string): Promise<void> {
@@ -263,10 +332,13 @@ async function transition(
 
 /** Probe one target and alert on a state change. Each target owns its KV key,
  *  so its alerts and recovery are independent of every other target's. */
-async function runTarget(target: TargetConfig, env: Env): Promise<TargetResult> {
+async function runTarget(target: TargetConfig, env: Env, opts: ProbeOptions): Promise<TargetResult> {
   let problems: string[]
+  let deepChecked = false
   try {
-    problems = await probe(target, env)
+    const result = await probe(target, env, opts)
+    problems = result.problems
+    deepChecked = result.deepChecked
   } catch (e) {
     // A thrown probe is that target's problem, not a dead run.
     problems = [`probe failed: ${errText(e)}`]
@@ -281,10 +353,10 @@ async function runTarget(target: TargetConfig, env: Env): Promise<TargetResult> 
   } else if (recovered) {
     await telegram(env, `🟢 ${tag} vitals: recovered, all checks green`)
   }
-  return { name: target.name, problems, alerted: shouldAlert, recovered }
+  return { name: target.name, problems, alerted: shouldAlert, recovered, deep_checked: deepChecked }
 }
 
-export async function run(env: Env, only?: string): Promise<{ targets: TargetResult[] }> {
+export async function run(env: Env, only?: string, opts: ProbeOptions = {}): Promise<{ targets: TargetResult[] }> {
   let targets: TargetConfig[]
   try {
     targets = parseTargets(env.TARGETS)
@@ -308,12 +380,12 @@ export async function run(env: Env, only?: string): Promise<{ targets: TargetRes
   // Concurrent: one target failing or timing out must not delay or suppress
   // the others. allSettled because a rejection here (KV or Telegram, since
   // runTarget already absorbs probe errors) must not kill the whole run.
-  const settled = await Promise.allSettled(targets.map((t) => runTarget(t, env)))
+  const settled = await Promise.allSettled(targets.map((t) => runTarget(t, env, opts)))
   const results = settled.map((s, i): TargetResult => {
     if (s.status === 'fulfilled') return s.value
     const reason = errText(s.reason)
     console.error(`vitals target ${targets[i].name} failed:`, reason)
-    return { name: targets[i].name, problems: [`run failed: ${reason}`], alerted: false, recovered: false }
+    return { name: targets[i].name, problems: [`run failed: ${reason}`], alerted: false, recovered: false, deep_checked: false }
   })
   return { targets: results }
 }
@@ -324,7 +396,9 @@ export default {
   },
 
   // Manual probe for testing, gated by MANUAL_PROBE_KEY. `?target=<name>`
-  // probes a single target; omit it to run them all.
+  // probes a single target; omit it to run them all. Always probes deep,
+  // ignoring deep_every_minutes — an on-demand check that replayed a cached
+  // result would be useless. Note that this wakes the database.
   async fetch(request: Request, env: Env): Promise<Response> {
     const key = env.MANUAL_PROBE_KEY
     // A 404 rather than a 401: an unset key disables the handler entirely and
@@ -334,7 +408,7 @@ export default {
     }
     const only = new URL(request.url).searchParams.get('target') ?? undefined
     try {
-      return Response.json(await run(env, only))
+      return Response.json(await run(env, only, { forceDeep: true }))
     } catch (e) {
       return Response.json({ error: errText(e) }, { status: 500 })
     }

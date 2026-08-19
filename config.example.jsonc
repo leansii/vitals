@@ -46,6 +46,20 @@
 		// Optional. Path of the deep health endpoint. Default "/healthz/deep".
 		"health_path": "/healthz/deep",
 
+		// Optional. Throttle the deep probe to at most once per N minutes,
+		// independently of the cron. Set this when the health endpoint touches a
+		// database that scales to zero: waking one costs its whole idle timeout
+		// (a fixed 5 minutes on Neon's Free plan), so a 15-minute cron burns
+		// ~8 h/day of compute — enough to exhaust a free quota by itself and take
+		// the database down. `web_targets` keep running every tick, so frontend
+		// outages are still caught fast. Costs: a dead dependency is reported up
+		// to N minutes late, and `client_err_threshold` reads a fixed 15-minute
+		// window, so at N=60 it only samples a quarter of the time. Requires the
+		// STATE binding (the last deep result is cached under `deep:<name>` and
+		// replayed on throttled ticks, so a skipped probe cannot look like a
+		// recovery). 0 or omitted = probe deep every tick.
+		"deep_every_minutes": 60,
+
 		// Optional. Per-request timeout in ms, for both the API and the web
 		// probes. Default 15000.
 		"timeout_ms": 15000

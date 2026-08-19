@@ -3,25 +3,14 @@
 	"name": "vitals",
 	"main": "src/index.ts",
 	"compatibility_date": "2025-01-01",
-	// Probe hourly. This interval is dictated by the DATABASE, not by how fast
-	// you want to detect an outage. /healthz/deep pings Postgres, and a
-	// serverless Postgres that has scaled to zero stays awake for its whole
-	// idle timeout once woken — on Neon's Free plan a fixed 5 minutes, which
-	// cannot be shortened or disabled. So every probe costs >=5 min of compute
-	// against a 100 CU-hour/month/project quota:
-	//   */15      96 probes/day x 5 min = 8 h/day ~= 60 CU-h/month  (60% of it)
-	//   0 * * * * 24 probes/day x 5 min = 2 h/day ~= 15 CU-h/month
-	// At */15 the monitor exhausts the quota on its own, Neon suspends the
-	// compute, and the watchman takes down what it was watching. Hence hourly.
-	// Trade-offs, both real: outage detection latency up to 1 hour, and the
-	// client-error check reads a fixed 15-min window (new_signatures_15m), so
-	// at this cadence it samples 15 min out of every 60 — spikes that start and
-	// subside in between are missed entirely.
-	// If your health endpoint does not touch a scale-to-zero database, none of
-	// this applies and */15 or faster is fine.
+	// Probe every 15 minutes. The DB-touching part of the check is throttled
+	// separately, per target, via `deep_every_minutes` — see below. That split is
+	// the whole point: frontend probes are free, so they run every tick and catch
+	// an outage in <=15 min, while the deep probe wakes a scale-to-zero Postgres
+	// and is therefore rationed.
 	"triggers": {
 		"crons": [
-			"0 * * * *"
+			"*/15 * * * *"
 		]
 	},
 	// Optional: a custom domain for the on-demand probe, so it doesn't depend on
@@ -48,7 +37,18 @@
 				"expected": "auth=on,auth_emulator=off,storage=on,covers=on,embeddings=on,passkeys=on,cors=on,frontend_url=on,tls=off",
 				"web_targets": "https://app.getcyclecare.com",
 				"client_err_threshold": "3",
-				"health_key_secret": "HEALTH_KEY_CYCLECARE"
+				"health_key_secret": "HEALTH_KEY_CYCLECARE",
+				// The API pings Neon. A woken Neon compute stays up for its idle
+				// timeout — a fixed 5 min on the Free plan — so every deep probe costs
+				// >=5 min of compute against a 100 CU-hour/month/project quota:
+				//   every 15 min  96/day x 5 min = 8 h/day ~= 60 CU-h/month (60% of it)
+				//   every 60 min  24/day x 5 min = 2 h/day ~= 15 CU-h/month
+				// At the faster rate the monitor exhausted the quota on its own, Neon
+				// suspended the compute, and the watchman took down what it watched.
+				// Cost of hourly: a dead DB is reported up to an hour late, and
+				// client_errors.new_signatures_15m is a 15-min window, so it now samples
+				// 15 min out of every 60 — brief spikes in between are missed.
+				"deep_every_minutes": 60
 			}
 		]
 	},
