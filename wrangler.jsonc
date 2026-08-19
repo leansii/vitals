@@ -58,12 +58,17 @@
 				// >=5 min of compute against a 100 CU-hour/month/project quota:
 				//   every 15 min  96/day x 5 min = 8 h/day ~= 60 CU-h/month (60% of it)
 				//   every 60 min  24/day x 5 min = 2 h/day ~= 15 CU-h/month
+				//   every 4 h      6/day x 5 min = 0.5 h/day ~= 4 CU-h/month
 				// At the faster rate the monitor exhausted the quota on its own, Neon
 				// suspended the compute, and the watchman took down what it watched.
 				// Cost of hourly: a dead DB is reported up to an hour late, and
-				// client_errors.new_signatures_15m is a 15-min window, so it now samples
-				// 15 min out of every 60 — brief spikes in between are missed.
-				"deep_every_minutes": 60
+				// the client-error window no longer under-samples: vitals sends
+				// ?spike_window_minutes=240 (taken from this value) and the backend
+				// answers with a matching new_signatures_window, so the check covers
+				// the whole interval rather than a 15-min slice of it.
+				// Liveness is unaffected — /livez is in web_targets and is probed
+				// every tick for free, so an API outage is still caught in <=15 min.
+				"deep_every_minutes": 240
 			}
 		]
 	},
