@@ -133,6 +133,8 @@ const DEFAULT_TIMEOUT_MS = 15_000
 const DEEP_DUE_GRACE_MS = 60_000
 /** KV key for problems with the TARGETS config itself, not with any target. */
 const CONFIG_STATE_KEY = 'last-signature:__config__'
+/** KV key for the monitor failing at its own job, as opposed to a target failing. */
+const MONITOR_STATE_KEY = 'last-signature:__monitor__'
 
 const errText = (e: unknown): string => (e instanceof Error ? e.message : String(e))
 
@@ -395,6 +397,31 @@ async function runTarget(target: TargetConfig, env: Env, opts: ProbeOptions): Pr
   return { name: target.name, problems, alerted: shouldAlert, recovered, deep_checked: deepChecked }
 }
 
+/** A target whose run threw — KV or Telegram, since probe errors are absorbed
+ *  into that target's problems. Reported, because the alternative is a monitor
+ *  that stops monitoring and looks identical to one with nothing to report. */
+async function reportMonitorFailures(env: Env, failures: { name: string; reason: string }[]): Promise<void> {
+  const lines = failures.map((f) => `• [${f.name}] ${f.reason}`)
+  const signature = lines.join('\n')
+  let shouldAlert = signature !== ''
+  let recovered = false
+  try {
+    const state = await transition(env, MONITOR_STATE_KEY, signature)
+    shouldAlert = state.shouldAlert
+    recovered = state.recovered
+  } catch {
+    // KV is the likeliest thing to have broken, and it is what edge-triggering
+    // depends on. A monitor that cannot remember its state errs toward noise.
+    shouldAlert = signature !== ''
+  }
+  if (shouldAlert) {
+    const head = `🔴 [vitals] monitor failure: ${failures.length} target(s) could not be checked`
+    await telegram(env, [head, ...lines].join('\n'))
+  } else if (recovered) {
+    await telegram(env, '🟢 [vitals] monitor recovered, all targets checked')
+  }
+}
+
 export async function run(env: Env, only?: string, opts: ProbeOptions = {}): Promise<{ targets: TargetResult[] }> {
   let targets: TargetConfig[]
   try {
@@ -420,12 +447,16 @@ export async function run(env: Env, only?: string, opts: ProbeOptions = {}): Pro
   // the others. allSettled because a rejection here (KV or Telegram, since
   // runTarget already absorbs probe errors) must not kill the whole run.
   const settled = await Promise.allSettled(targets.map((t) => runTarget(t, env, opts)))
+  const failures: { name: string; reason: string }[] = []
   const results = settled.map((s, i): TargetResult => {
     if (s.status === 'fulfilled') return s.value
     const reason = errText(s.reason)
     console.error(`vitals target ${targets[i].name} failed:`, reason)
+    failures.push({ name: targets[i].name, reason })
     return { name: targets[i].name, problems: [`run failed: ${reason}`], alerted: false, recovered: false, deep_checked: false }
   })
+  // Always called, so clearing failures sends the recovery message too.
+  await reportMonitorFailures(env, failures)
   return { targets: results }
 }
 
