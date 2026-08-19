@@ -215,6 +215,18 @@ times a day instead of 96. The last deep result is cached in KV and replayed on
 throttled ticks, so a skipped probe can never read as a recovery — without that,
 an ongoing outage would flap 🔴/🟢 once per tick.
 
+The flip side of that cache: a replayed result can outlive what it describes. Fix
+the monitored service and the alert keeps quoting the old failure until the next
+deep probe falls due — up to `deep_every_minutes` later. To re-sync immediately,
+drop the cached state and let the next tick re-probe:
+
+```sh
+npx wrangler kv key delete "deep:<target-name>" --namespace-id <id> --remote
+```
+
+Worth doing after any deploy that changes what the monitored service reports.
+The manual probe has the same effect, since it always forces a deep check.
+
 Two costs remain, both real:
 
 - a failed dependency is reported up to `deep_every_minutes` late;
