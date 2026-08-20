@@ -138,6 +138,42 @@ const MONITOR_STATE_KEY = 'last-signature:__monitor__'
 
 const errText = (e: unknown): string => (e instanceof Error ? e.message : String(e))
 
+/** Collapse a problem to the part that identifies WHICH problem it is, dropping
+ *  what merely varies between probes of the same condition.
+ *
+ *  Edge-triggering compares signatures, so anything volatile in a problem string
+ *  reads as a state change and re-alerts. Two things churn in practice: the
+ *  measured latency, which differs every probe, and dependency errors that list
+ *  one line per resolved address — the same failure, re-ordered, with addresses
+ *  that come and go. So: normalise the latency, replace addresses with a
+ *  placeholder, then dedupe and sort the lines. Six identical "this address
+ *  failed because X" lines collapse to one, and their order stops mattering.
+ *
+ *  What deliberately survives is the error text itself, so a dependency failing
+ *  for a NEW reason still alerts. Do not reduce this to the first line: a driver
+ *  typically puts a generic "failed to connect" there and the actual cause
+ *  below, which would make every distinct failure look identical.
+ *
+ *  Alerts always show the full untouched text; only the comparison is normalised. */
+function problemKey(problem: string): string {
+  const lines = problem
+    .replace(/\(\d+(\.\d+)?ms\)/g, '(Nms)')
+    .split('\n')
+    .map((line) =>
+      line
+        .replace(/\[[0-9a-fA-F:]+\](:\d+)?/g, '<addr>') // bracketed IPv6, optional port
+        .replace(/\b\d{1,3}(?:\.\d{1,3}){3}(:\d+)?\b/g, '<addr>') // IPv4, optional port
+        .trim(),
+    )
+    .filter(Boolean)
+  return [...new Set(lines)].sort().join(' | ')
+}
+
+/** The value edge-triggering compares. See problemKey. */
+export function signatureOf(problems: string[]): string {
+  return problems.map(problemKey).join('\n')
+}
+
 function hostOf(url: string): string {
   try {
     return new URL(url).host
@@ -384,7 +420,8 @@ async function runTarget(target: TargetConfig, env: Env, opts: ProbeOptions): Pr
     // A thrown probe is that target's problem, not a dead run.
     problems = [`probe failed: ${errText(e)}`]
   }
-  const signature = problems.join('\n')
+  // Compared, not displayed: a re-measured latency must not read as a new state.
+  const signature = signatureOf(problems)
   const tag = `[${target.name}]`
   const { shouldAlert, recovered } = await transition(env, `last-signature:${target.name}`, signature)
 

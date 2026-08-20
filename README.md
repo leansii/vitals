@@ -15,7 +15,11 @@ For each project it:
 
 Alerts are **edge-triggered per project**: a target alerts when its problem
 signature *changes* and sends a 🟢 recovery message when it clears — a two-hour
-outage is one message, not eight. Targets are probed concurrently and hold
+outage is one message, not eight. The signature ignores what varies between
+probes of the same condition (measured latency, the ordering and addresses in a
+multi-line dependency error) but keeps the error text, so the same outage stays
+quiet while a *different* failure still alerts. Alerts themselves always carry
+the full untouched detail. Targets are probed concurrently and hold
 independent state, so a broken project never delays or masks the others.
 
 ```
